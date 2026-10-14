@@ -242,6 +242,20 @@ export const promoGenerationLimiter = new MemoryRateLimiter(20, 60 * 60 * 1000);
 export const feedbackLimiter = new MemoryRateLimiter(15, 60 * 1000); // 15 reviews per min per IP
 export const orderCreationLimiter = new MemoryRateLimiter(10, 60 * 60 * 1000); // 10 orders per hour per IP
 export const businessCreationLimiter = new MemoryRateLimiter(10, 60 * 60 * 1000); // 10 signups per hour per IP
+export const redemptionLimiter = new MemoryRateLimiter(10, 15 * 60 * 1000); // 10 redemptions per 15m per business:IP
+export const pinFailureLimiter = new MemoryRateLimiter(5, 15 * 60 * 1000, 15 * 60 * 1000); // 5 failed PINs per 15m, then 15m lockout
+
+// Check that sensitive tokens/PINs are NOT exposed in URL query parameters
+export function hasUrlCredentials(req: Request): { hasLeak: boolean; leakedParam?: string } {
+  const query = req.query as Record<string, any>;
+  const sensitiveParams = ['token', 'staffPin', 'walletToken', 'pin', 'ownerKey', 'secret', 'passcode'];
+  for (const param of sensitiveParams) {
+    if (query[param] !== undefined && String(query[param]).trim().length > 0) {
+      return { hasLeak: true, leakedParam: param };
+    }
+  }
+  return { hasLeak: false };
+}
 
 // -------------------------------------------------------------
 // ATOMIC WALLET MUTEX / IN-MEMORY LOCKING

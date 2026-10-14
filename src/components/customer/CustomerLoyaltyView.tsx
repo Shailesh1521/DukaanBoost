@@ -118,10 +118,12 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
 
     try {
       const bizId = business.id || 'chai-shai-cafe';
+      const idempotencyKey = `chk_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       const payload: any = {
         businessId: bizId,
         phone: cleanPhone,
         customerName: wallet?.name,
+        idempotencyKey,
       };
 
       if (checkinMethod === 'daily_code') {
@@ -132,7 +134,10 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
 
       const res = await fetch('/api/loyalty/checkin', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
         body: JSON.stringify(payload),
       });
 
@@ -168,14 +173,19 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
 
     try {
       const bizId = business.id || 'chai-shai-cafe';
+      const idempotencyKey = `rdm_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       const res = await fetch('/api/loyalty/redeem', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
         body: JSON.stringify({
           businessId: bizId,
           phone: wallet.phone,
           rewardId: selectedRewardToRedeem.id,
           staffPin: redemptionStaffPin.trim(),
+          idempotencyKey,
         }),
       });
 

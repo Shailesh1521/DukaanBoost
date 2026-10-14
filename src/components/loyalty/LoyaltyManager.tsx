@@ -165,14 +165,19 @@ export const LoyaltyManager: React.FC<LoyaltyManagerProps> = ({
     if (!searchedCustomer || !config) return;
     try {
       const bizId = business.id || 'chai-shai-cafe';
+      const idempotencyKey = `staff_chk_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       const res = await fetch('/api/loyalty/checkin', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
         body: JSON.stringify({
           businessId: bizId,
           phone: searchedCustomer.phone,
           customerName: searchedCustomer.name,
           staffPin: config.staffPin,
+          idempotencyKey,
         }),
       });
 

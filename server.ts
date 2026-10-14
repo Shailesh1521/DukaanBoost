@@ -17,8 +17,8 @@ import {
   LoyaltyLedgerEntry,
   CustomerLoyaltyWallet,
   AnalyticsSummary,
-} from './src/types';
-import { DEFAULT_STORE_SETTINGS, SAMPLE_BUSINESS_PROFILES } from './src/sampleData';
+} from './src/types.js';
+import { DEFAULT_STORE_SETTINGS, SAMPLE_BUSINESS_PROFILES } from './src/sampleData.js';
 import {
   getActiveAdminPasscode,
   getActiveAdminSessionSecret,
@@ -33,6 +33,9 @@ import {
   feedbackLimiter,
   orderCreationLimiter,
   businessCreationLimiter,
+  redemptionLimiter,
+  pinFailureLimiter,
+  hasUrlCredentials,
   getClientIp,
   withWalletLock,
   generateDailyCheckinCode,
@@ -46,7 +49,8 @@ import {
   normalizeIndianPhone,
   sanitizeUpiRef,
   isValidIndianPhone,
-} from './server/security';
+} from './server/security.js';
+import { db } from './server/db.js';
 
 dotenv.config();
 
@@ -70,7 +74,7 @@ if (!fs.existsSync(DATA_DIR)) {
   }
 }
 
-// Persistent Storage File Paths
+// Persistent Storage File Paths (Maintained for JSON snapshots and compatibility)
 const ORDERS_FILE = path.join(DATA_DIR, 'orders.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const BUSINESSES_FILE = path.join(DATA_DIR, 'businesses.json');
@@ -117,45 +121,6 @@ export function writeAtomicJsonSync<T>(filePath: string, data: T): void {
 // Production mode NEVER seeds default credentials or demo businesses.
 // Development mode provisions dynamic random credentials, never hardcoded strings.
 // -------------------------------------------------------------
-
-function getInitialBusinessProfiles(): Record<string, BusinessProfile> {
-  if (isProduction) {
-    // In production, start empty unless persisted businesses already exist
-    return readJsonFile<Record<string, BusinessProfile>>(BUSINESSES_FILE, {});
-  }
-
-  // Development mode: load from disk or provision dynamic demo business
-  const existing = readJsonFile<Record<string, BusinessProfile>>(BUSINESSES_FILE, {});
-  if (Object.keys(existing).length > 0) {
-    return existing;
-  }
-
-  // Generate dynamic, isolated credentials for development demo
-  const devOwnerKey = generateBusinessOwnerKey();
-  const devStaffPin = generateStaffPin();
-
-  const devBusiness: BusinessProfile = {
-    id: 'chai-shai-cafe',
-    businessName: 'Chai Shai & Snacks Corner',
-    category: 'cafe',
-    city: 'Indore, MP',
-    address: 'Shop 14, Chappan Dukan, New Palasia, Indore',
-    contactPhone: '9826012345',
-    productsServices: 'Special Masala Kulhad Chai, Bun Maska, Crispy Paneer Pakode, Cheese Grilled Sandwiches, Cold Coffee',
-    targetAudience: 'College students, office workers, local foodies and tea lovers',
-    promotionObjective: 'more_sales',
-    offerDiscount: 'Chai + Samosa Combo @ ₹49 Only',
-    preferredLanguage: 'hinglish',
-    visualStyle: 'chai_bites',
-    brandColor: '#ea580c',
-    googleReviewUrl: 'https://g.page/r/sample-chai-shai-indore/review',
-    ownerKey: devOwnerKey,
-    staffPin: devStaffPin,
-    createdAt: '2026-10-14T05:00:00.000Z',
-  };
-
-  return { 'chai-shai-cafe': devBusiness };
-}
 
 const DEFAULT_MENU: DigitalMenu = {
   businessId: 'chai-shai-cafe',
@@ -237,90 +202,93 @@ const DEFAULT_MENU: DigitalMenu = {
   ],
 };
 
-function getInitialLoyaltyStorage(businessProfiles: Record<string, BusinessProfile>): LoyaltyStorage {
-  const existing = readJsonFile<LoyaltyStorage>(LOYALTY_FILE, {
-    configs: {},
-    wallets: {},
-    ledger: [],
-  });
-
-  if (isProduction || Object.keys(existing.configs).length > 0) {
-    return existing;
-  }
-
-  // Development demo seeding
-  const devBiz = businessProfiles['chai-shai-cafe'];
-  const daily = generateDailyCheckinCode();
-  const devStaffPin = devBiz?.staffPin || generateStaffPin();
-
-  return {
-    configs: {
-      'chai-shai-cafe': {
-        businessId: 'chai-shai-cafe',
-        enabled: true,
-        pointsPerVisit: 10,
-        minHoursBetweenVisits: 12,
-        dailyCheckinCode: daily.code,
-        dailyCodeExpiresAt: daily.expiresAt,
-        staffPin: devStaffPin,
-        rewards: [
-          { id: 'rew-1', title: 'Free Kulhad Masala Chai', description: 'Enjoy 1 free cup of our signature tea', pointsRequired: 30, isActive: true },
-          { id: 'rew-2', title: 'Free Bun Maska or 2 Samosas', description: 'Valid with any tea or beverage order', pointsRequired: 50, isActive: true },
-          { id: 'rew-3', title: 'Free Cheese Grilled Sandwich', description: 'Your choice of veg cheese grilled sandwich', pointsRequired: 100, isActive: true },
-        ],
-      },
-    },
-    wallets: {
-      'chai-shai-cafe': {
-        '9826011111': {
-          phone: '9826011111',
-          name: 'Demo Patron',
-          pointsBalance: 40,
-          totalVisits: 4,
-          lastVisitAt: '2026-10-14T03:30:00.000Z',
-          walletToken: generateWalletToken(),
-        },
-      },
-    },
-    ledger: [
-      {
-        id: 'led-seed-1',
-        businessId: 'chai-shai-cafe',
-        customerPhone: '9826011111',
-        customerName: 'Demo Patron',
-        type: 'visit_award',
-        pointsChange: 10,
-        staffVerified: true,
-        note: 'Visit check-in verified by staff',
-        createdAt: '2026-10-14T03:30:00.000Z',
-      },
-    ],
-  };
-}
-
 interface LoyaltyStorage {
   configs: Record<string, LoyaltyConfig>;
   wallets: Record<string, Record<string, { phone: string; name?: string; pointsBalance: number; totalVisits: number; lastVisitAt?: string; walletToken?: string }>>;
   ledger: (LoyaltyLedgerEntry & { idempotencyKey?: string })[];
 }
 
-// In-Memory Storage Cache initialized from files
+// In-Memory Storage Cache initialized and backed by SQLite DB
 let inMemoryOrders: Order[] = readJsonFile<Order[]>(ORDERS_FILE, []);
 let currentSettings: StoreSettings = readJsonFile<StoreSettings>(SETTINGS_FILE, {
   ...DEFAULT_STORE_SETTINGS,
   foundingSetupPrice: 249,
 });
-let inMemoryBusinesses: Record<string, BusinessProfile> = getInitialBusinessProfiles();
-let inMemoryMenus: Record<string, DigitalMenu> = readJsonFile<Record<string, DigitalMenu>>(
-  MENUS_FILE,
-  isProduction ? {} : { 'chai-shai-cafe': DEFAULT_MENU }
-);
-let inMemoryFeedback: FeedbackSubmission[] = readJsonFile<FeedbackSubmission[]>(FEEDBACK_FILE, []);
-let inMemoryLoyalty: LoyaltyStorage = getInitialLoyaltyStorage(inMemoryBusinesses);
-let inMemoryAnalytics: Record<string, { scans: number; menuViews: number; visits: number }> = readJsonFile<Record<string, { scans: number; menuViews: number; visits: number }>>(
-  ANALYTICS_FILE,
-  isProduction ? {} : { 'chai-shai-cafe': { scans: 48, menuViews: 42, visits: 18 } }
-);
+let inMemoryBusinesses: Record<string, BusinessProfile> = {};
+let inMemoryMenus: Record<string, DigitalMenu> = {};
+let inMemoryFeedback: FeedbackSubmission[] = [];
+let inMemoryLoyalty: LoyaltyStorage = {
+  configs: {},
+  wallets: {},
+  ledger: [],
+};
+let inMemoryAnalytics: Record<string, { scans: number; menuViews: number; visits: number }> = {};
+
+// Initialize SQLite database and sync cache
+function syncDbToMemory(): void {
+  const allBiz = db.getAllBusinesses();
+  inMemoryBusinesses = {};
+  for (const b of allBiz) {
+    if (b.id) {
+      inMemoryBusinesses[b.id] = b;
+      const m = db.getMenu(b.id);
+      if (m) inMemoryMenus[b.id] = m;
+      const l = db.getLoyaltyConfig(b.id);
+      if (l) inMemoryLoyalty.configs[b.id] = l;
+      inMemoryAnalytics[b.id] = db.getAnalytics(b.id);
+    }
+  }
+}
+
+// Seed development demo if database is empty and not in production
+function initSeedData(): void {
+  const existing = db.getAllBusinesses();
+  if (existing.length === 0 && !isProduction) {
+    const devOwnerKey = generateBusinessOwnerKey();
+    const devStaffPin = generateStaffPin();
+    const devDaily = generateDailyCheckinCode();
+
+    const devBusiness: BusinessProfile = {
+      id: 'chai-shai-cafe',
+      businessName: 'Chai Shai & Snacks Corner',
+      category: 'cafe',
+      city: 'Indore, MP',
+      address: 'Shop 14, Chappan Dukan, New Palasia, Indore',
+      contactPhone: '9826012345',
+      productsServices: 'Special Masala Kulhad Chai, Bun Maska, Crispy Paneer Pakode, Cheese Grilled Sandwiches, Cold Coffee',
+      targetAudience: 'College students, office workers, local foodies and tea lovers',
+      promotionObjective: 'more_sales',
+      offerDiscount: 'Chai + Samosa Combo @ ₹49 Only',
+      preferredLanguage: 'hinglish',
+      visualStyle: 'chai_bites',
+      brandColor: '#ea580c',
+      googleReviewUrl: 'https://g.page/r/sample-chai-shai-indore/review',
+      ownerKey: devOwnerKey,
+      staffPin: devStaffPin,
+      createdAt: '2026-10-14T05:00:00.000Z',
+    };
+
+    db.upsertBusiness(devBusiness);
+    db.upsertMenu(DEFAULT_MENU);
+    db.upsertLoyaltyConfig({
+      businessId: 'chai-shai-cafe',
+      enabled: true,
+      pointsPerVisit: 10,
+      minHoursBetweenVisits: 12,
+      dailyCheckinCode: devDaily.code,
+      dailyCodeExpiresAt: devDaily.expiresAt,
+      staffPin: devStaffPin,
+      rewards: [
+        { id: 'rew-1', title: 'Free Kulhad Masala Chai', description: 'Enjoy 1 free cup of our signature tea', pointsRequired: 30, isActive: true },
+        { id: 'rew-2', title: 'Free Bun Maska or 2 Samosas', description: 'Valid with any tea or beverage order', pointsRequired: 50, isActive: true },
+        { id: 'rew-3', title: 'Free Cheese Grilled Sandwich', description: 'Your choice of veg cheese grilled sandwich', pointsRequired: 100, isActive: true },
+      ],
+    });
+  }
+  syncDbToMemory();
+}
+
+initSeedData();
 
 // -------------------------------------------------------------
 // AUTHORIZATION MIDDLEWARES
@@ -353,7 +321,7 @@ export function checkBusinessAuth(req: Request, res: Response, next: NextFunctio
 
   // 2. Business key validation
   const clientBizKey = req.headers['x-business-key'] as string;
-  const business = inMemoryBusinesses[businessId];
+  const business = inMemoryBusinesses[businessId] || db.getBusiness(businessId);
 
   if (!business || !business.ownerKey || !clientBizKey || !safeCompare(clientBizKey, business.ownerKey)) {
     res.status(403).json({
@@ -419,8 +387,9 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     geminiConfigured: !!process.env.GEMINI_API_KEY,
+    storage: 'sqlite-transactional',
     time: new Date().toISOString(),
-    version: '2.6.0-security-hardened',
+    version: '3.0.0-transactional-hardened',
     mode: process.env.NODE_ENV || 'development',
   });
 });
@@ -432,12 +401,13 @@ app.get('/api/store-settings', (req, res) => {
 
 // 3. Business Management (Secured)
 app.get('/api/businesses', (req, res) => {
-  const safeList = Object.values(inMemoryBusinesses).map(serializePublicBusinessProfile);
+  const businesses = db.getAllBusinesses();
+  const safeList = businesses.map(serializePublicBusinessProfile);
   res.json(safeList);
 });
 
 app.get('/api/businesses/:id', (req, res) => {
-  const b = inMemoryBusinesses[req.params.id];
+  const b = db.getBusiness(req.params.id) || inMemoryBusinesses[req.params.id];
   if (!b) {
     res.status(404).json({ error: 'Business not found' });
     return;
@@ -449,14 +419,27 @@ app.get('/api/businesses/:id', (req, res) => {
   const isAdmin = validateAdminSession(adminToken);
 
   if (isOwner || isAdmin) {
+    // Return full profile to verified owner or admin
     res.json(b);
   } else {
+    // Return safe public profile without sensitive ownerKey or staffPin
     res.json(serializePublicBusinessProfile(b));
   }
 });
 
 // Business Creation / Update Endpoint
+// - Always generates owner keys and staff credentials server-side for new businesses
+// - Ignores caller-supplied ownerKey and staffPin
+// - Prevents slug collisions and blocks unauthorized public overwrites
 app.post('/api/businesses', (req: Request, res: Response): void => {
+  const urlCheck = hasUrlCredentials(req);
+  if (urlCheck.hasLeak) {
+    res.status(400).json({
+      error: `Security violation: sensitive credential (${urlCheck.leakedParam}) cannot be sent in URL query parameters. Use HTTP headers or request body.`,
+    });
+    return;
+  }
+
   const clientIp = getClientIp(req);
   const limitCheck = businessCreationLimiter.isAllowed(clientIp);
   if (!limitCheck.allowed) {
@@ -476,390 +459,347 @@ app.post('/api/businesses', (req: Request, res: Response): void => {
     return;
   }
 
-  const slug = profile.id || profile.businessName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-  const existing = inMemoryBusinesses[slug];
+  const baseSlug = profile.businessName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+    .slice(0, 50) || 'business';
 
-  // If modifying an existing business, caller MUST prove ownership or be admin
-  if (existing) {
-    const adminToken = req.headers['x-admin-token'] as string;
-    const clientBizKey = req.headers['x-business-key'] as string;
-    const isOwner = Boolean(clientBizKey && existing.ownerKey && safeCompare(clientBizKey, existing.ownerKey));
-    const isAdmin = validateAdminSession(adminToken);
+  let targetId = '';
+  let isNew = true;
 
-    if (!isOwner && !isAdmin) {
-      res.status(403).json({ error: 'Forbidden. Authorization required to modify this existing business.' });
+  if (profile.id) {
+    const existing = db.getBusiness(profile.id);
+    if (existing) {
+      // Caller specified existing ID: must prove ownership or admin auth to modify
+      const adminToken = req.headers['x-admin-token'] as string;
+      const clientBizKey = req.headers['x-business-key'] as string;
+      const isOwner = Boolean(clientBizKey && existing.ownerKey && safeCompare(clientBizKey, existing.ownerKey));
+      const isAdmin = validateAdminSession(adminToken);
+
+      if (!isOwner && !isAdmin) {
+        res.status(409).json({
+          error: 'A business with this identifier already exists. Unauthorized public requests cannot overwrite or claim an existing business.',
+        });
+        return;
+      }
+
+      // Legitimate authorized update of existing business
+      isNew = false;
+      targetId = existing.id || profile.id || '';
+      const updatedBusiness: BusinessProfile = {
+        ...existing,
+        businessName: sanitizeString(profile.businessName, 100),
+        category: sanitizeString(profile.category, 50) || existing.category,
+        city: sanitizeString(profile.city, 80) || existing.city,
+        address: profile.address ? sanitizeString(profile.address, 200) : existing.address,
+        contactPhone: cleanPhone || existing.contactPhone || '',
+        brandColor: profile.brandColor || existing.brandColor,
+        productsServices: profile.productsServices ? sanitizeString(profile.productsServices, 300) : existing.productsServices,
+        targetAudience: profile.targetAudience ? sanitizeString(profile.targetAudience, 200) : existing.targetAudience,
+        promotionObjective: profile.promotionObjective || existing.promotionObjective,
+        offerDiscount: profile.offerDiscount ? sanitizeString(profile.offerDiscount, 150) : existing.offerDiscount,
+        googleReviewUrl: profile.googleReviewUrl ? sanitizeString(profile.googleReviewUrl, 250) : existing.googleReviewUrl,
+      };
+
+      db.upsertBusiness(updatedBusiness);
+      syncDbToMemory();
+
+      res.json({
+        ...serializePublicBusinessProfile(updatedBusiness),
+        ownerKey: existing.ownerKey,
+        staffPin: existing.staffPin,
+        message: 'Business profile updated successfully.',
+      });
       return;
+    } else {
+      // New unique ID provided by caller
+      targetId = profile.id.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 50);
+    }
+  } else {
+    // Auto-generate slug from businessName; ensure no collision
+    if (db.getBusiness(baseSlug)) {
+      targetId = `${baseSlug}-${crypto.randomBytes(3).toString('hex')}`;
+    } else {
+      targetId = baseSlug;
     }
   }
 
-  const isNew = !existing;
-  const ownerKey = existing?.ownerKey || profile.ownerKey || generateBusinessOwnerKey();
-  const staffPin = profile.staffPin
-    ? String(profile.staffPin).trim().replace(/[^0-9]/g, '').slice(0, 8)
-    : (existing?.staffPin || generateStaffPin());
+  // Creating a new business: ALWAYS generate server-side credentials and ignore caller input
+  const generatedOwnerKey = generateBusinessOwnerKey();
+  const generatedStaffPin = generateStaffPin();
+  const { code: checkinCode, expiresAt: checkinExpiresAt } = generateDailyCheckinCode();
 
-  const updated: BusinessProfile = {
-    ...profile,
-    id: slug,
-    ownerKey,
-    staffPin,
+  const newBusiness: BusinessProfile = {
+    id: targetId,
     businessName: sanitizeString(profile.businessName, 100),
-    city: sanitizeString(profile.city, 80),
-    contactPhone: cleanPhone,
+    category: sanitizeString(profile.category, 50) || 'cafe',
+    city: sanitizeString(profile.city, 80) || 'Local',
+    address: profile.address ? sanitizeString(profile.address, 200) : undefined,
+    contactPhone: cleanPhone || '',
+    productsServices: profile.productsServices ? sanitizeString(profile.productsServices, 300) : 'General Offerings',
+    targetAudience: profile.targetAudience ? sanitizeString(profile.targetAudience, 200) : 'Local Customers',
+    promotionObjective: profile.promotionObjective || 'more_sales',
+    offerDiscount: profile.offerDiscount ? sanitizeString(profile.offerDiscount, 150) : '',
+    preferredLanguage: profile.preferredLanguage || 'hinglish',
+    visualStyle: profile.visualStyle || 'chai_bites',
     brandColor: profile.brandColor || '#ea580c',
-    createdAt: existing?.createdAt || new Date().toISOString(),
+    googleReviewUrl: profile.googleReviewUrl ? sanitizeString(profile.googleReviewUrl, 250) : undefined,
+    ownerKey: generatedOwnerKey,
+    staffPin: generatedStaffPin,
+    createdAt: new Date().toISOString(),
   };
 
-  const prevBusiness = inMemoryBusinesses[slug];
-  inMemoryBusinesses[slug] = updated;
+  const defaultMenu: DigitalMenu = {
+    businessId: targetId,
+    businessName: newBusiness.businessName,
+    currency: '₹',
+    lastUpdated: new Date().toISOString(),
+    categories: [{ id: 'cat-1', name: 'General Menu', sortOrder: 1 }],
+    items: [],
+  };
 
+  const defaultLoyalty: LoyaltyConfig = {
+    businessId: targetId,
+    enabled: true,
+    pointsPerVisit: 10,
+    minHoursBetweenVisits: 12,
+    staffPin: generatedStaffPin,
+    dailyCheckinCode: checkinCode,
+    dailyCodeExpiresAt: checkinExpiresAt,
+    rewards: [
+      { id: 'rew-1', title: 'Special Welcome Treat', description: 'Enjoy our signature introductory treat', pointsRequired: 30, isActive: true },
+    ],
+  };
+
+  // Transactionally save business, default menu, and default loyalty config
   try {
-    writeAtomicJsonSync(BUSINESSES_FILE, inMemoryBusinesses);
-  } catch (err) {
-    if (prevBusiness) {
-      inMemoryBusinesses[slug] = prevBusiness;
-    } else {
-      delete inMemoryBusinesses[slug];
-    }
-    res.status(500).json({ error: 'Storage persistence failure: business profile could not be saved.' });
-    return;
-  }
-
-  // Initialize default menu and loyalty if not present
-  if (!inMemoryMenus[slug]) {
-    inMemoryMenus[slug] = {
-      businessId: slug,
-      businessName: updated.businessName,
-      currency: '₹',
-      lastUpdated: new Date().toISOString(),
-      categories: [{ id: 'cat-1', name: 'General Menu', sortOrder: 1 }],
-      items: [],
-    };
-    try {
-      writeAtomicJsonSync(MENUS_FILE, inMemoryMenus);
-    } catch (e) {
-      console.warn('Could not persist default menu:', e);
-    }
-  }
-
-  if (!inMemoryLoyalty.configs[slug]) {
-    const { code, expiresAt } = generateDailyCheckinCode();
-    inMemoryLoyalty.configs[slug] = {
-      businessId: slug,
-      enabled: true,
-      pointsPerVisit: 10,
-      minHoursBetweenVisits: 12,
-      staffPin,
-      dailyCheckinCode: code,
-      dailyCodeExpiresAt: expiresAt,
-      rewards: [
-        { id: 'rew-1', title: 'Special Welcome Treat', description: 'Enjoy our signature introductory treat', pointsRequired: 30, isActive: true },
-      ],
-    };
-    try {
-      writeAtomicJsonSync(LOYALTY_FILE, inMemoryLoyalty);
-    } catch (e) {
-      console.warn('Could not persist default loyalty config:', e);
-    }
-  }
-
-  // Return sensitive ownerKey and staffPin ONLY to the creator/authorized owner
-  if (isNew) {
-    res.status(201).json({
-      ...serializePublicBusinessProfile(updated),
-      ownerKey,
-      staffPin,
-      message: 'Business created. Store your ownerKey and staffPin securely in your dashboard.',
+    db.withTransaction(() => {
+      db.upsertBusiness(newBusiness);
+      db.upsertMenu(defaultMenu);
+      db.upsertLoyaltyConfig(defaultLoyalty);
     });
-  } else {
-    res.json({
-      ...serializePublicBusinessProfile(updated),
-      ownerKey,
-      staffPin,
-    });
-  }
-});
-
-// Rotate Business Credentials Endpoint (Requires Owner or Admin Auth)
-app.post('/api/businesses/:id/rotate-credentials', checkBusinessAuth, (req: Request, res: Response): void => {
-  const businessId = req.params.id;
-  const business = inMemoryBusinesses[businessId];
-  if (!business) {
-    res.status(404).json({ error: 'Business not found.' });
+    syncDbToMemory();
+  } catch (err: any) {
+    res.status(500).json({ error: `Storage persistence failure: ${err.message}` });
     return;
   }
 
-  const prevOwnerKey = business.ownerKey;
-  const prevStaffPin = business.staffPin;
-
-  const newOwnerKey = generateBusinessOwnerKey();
-  const newStaffPin = generateStaffPin();
-
-  business.ownerKey = newOwnerKey;
-  business.staffPin = newStaffPin;
-
-  const loyaltyConfig = inMemoryLoyalty.configs[businessId];
-  if (loyaltyConfig) {
-    loyaltyConfig.staffPin = newStaffPin;
-  }
-
-  try {
-    writeAtomicJsonSync(BUSINESSES_FILE, inMemoryBusinesses);
-    writeAtomicJsonSync(LOYALTY_FILE, inMemoryLoyalty);
-  } catch (err) {
-    business.ownerKey = prevOwnerKey;
-    business.staffPin = prevStaffPin;
-    if (loyaltyConfig && prevStaffPin) loyaltyConfig.staffPin = prevStaffPin;
-    res.status(500).json({ error: 'Storage persistence failure: credential rotation could not be saved.' });
-    return;
-  }
-
-  res.json({
-    success: true,
-    ownerKey: newOwnerKey,
-    staffPin: newStaffPin,
-    message: 'Credentials rotated successfully. Save your new keys safely.',
+  res.status(201).json({
+    ...serializePublicBusinessProfile(newBusiness),
+    ownerKey: generatedOwnerKey,
+    staffPin: generatedStaffPin,
+    message: 'Business created successfully. Store your ownerKey and staffPin securely in your dashboard.',
   });
 });
 
-// 4. Digital Menu Endpoints
-app.get('/api/public/menu/:businessId', (req: Request, res: Response): void => {
-  const businessId = req.params.businessId;
-  const menu = inMemoryMenus[businessId];
-  const business = inMemoryBusinesses[businessId];
+// Rotate Business Credentials Endpoint (Requires Owner or Admin Auth)
+// Transactionally updates business profile and loyalty config together to eliminate partial persistence
+app.post('/api/businesses/:id/rotate-credentials', checkBusinessAuth, (req: Request, res: Response): void => {
+  const businessId = req.params.id;
+  const newOwnerKey = generateBusinessOwnerKey();
+  const newStaffPin = generateStaffPin();
 
-  // Record an analytics view event
-  if (!inMemoryAnalytics[businessId]) {
-    inMemoryAnalytics[businessId] = { scans: 0, menuViews: 0, visits: 0 };
-  }
-  inMemoryAnalytics[businessId].menuViews += 1;
   try {
-    writeAtomicJsonSync(ANALYTICS_FILE, inMemoryAnalytics);
-  } catch (e) {
-    // Non-fatal for public view
-  }
+    db.rotateBusinessCredentials(businessId, newOwnerKey, newStaffPin);
+    syncDbToMemory();
 
+    res.json({
+      success: true,
+      businessId,
+      ownerKey: newOwnerKey,
+      staffPin: newStaffPin,
+      message: 'Credentials rotated successfully across business and loyalty systems.',
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: `Credential rotation failed: ${err.message}` });
+  }
+});
+
+// 4. Digital Menu Endpoints (Secured)
+app.get('/api/businesses/:id/menu', (req, res) => {
+  const businessId = req.params.id;
+  const menu = db.getMenu(businessId) || inMemoryMenus[businessId];
   if (!menu) {
     res.status(404).json({ error: 'Menu not found for this business' });
     return;
   }
 
-  res.json({
-    menu,
-    business: business ? serializePublicBusinessProfile(business) : { businessName: menu.businessName, contactPhone: '' },
-  });
+  // Increment view counter
+  db.incrementAnalytics(businessId, 'menuViews');
+  res.json(menu);
 });
 
 app.post('/api/businesses/:id/menu', checkBusinessAuth, (req: Request, res: Response): void => {
   const businessId = req.params.id;
-  const menuData = req.body as DigitalMenu;
+  const menu = req.body as DigitalMenu;
 
-  if (!menuData || !Array.isArray(menuData.categories) || !Array.isArray(menuData.items)) {
-    res.status(400).json({ error: 'Invalid menu structure. Categories and items arrays are required.' });
+  if (!menu || !Array.isArray(menu.categories) || !Array.isArray(menu.items)) {
+    res.status(400).json({ error: 'Invalid menu structure.' });
     return;
   }
 
-  const prevMenu = inMemoryMenus[businessId];
-  menuData.businessId = businessId;
-  menuData.lastUpdated = new Date().toISOString();
+  menu.businessId = businessId;
+  menu.lastUpdated = new Date().toISOString();
 
-  inMemoryMenus[businessId] = menuData;
   try {
-    writeAtomicJsonSync(MENUS_FILE, inMemoryMenus);
-  } catch (err) {
-    inMemoryMenus[businessId] = prevMenu;
-    res.status(500).json({ error: 'Storage persistence failure: menu could not be saved.' });
-    return;
+    db.upsertMenu(menu);
+    inMemoryMenus[businessId] = menu;
+    res.json({ success: true, menu });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to persist menu updates.' });
   }
-
-  res.json({ success: true, menu: menuData });
 });
 
-// 5. Customer Feedback System (Rate Limited & Validated)
-app.post('/api/feedback', (req: Request, res: Response): void => {
+// 5. Customer Feedback Endpoints (Secured & Rate Limited)
+app.post('/api/businesses/:id/feedback', (req: Request, res: Response): void => {
   const clientIp = getClientIp(req);
   const limitCheck = feedbackLimiter.isAllowed(clientIp);
   if (!limitCheck.allowed) {
-    res.status(429).json({ error: `Too many submissions. Please wait ${limitCheck.retryAfterSeconds} seconds.` });
+    res.status(429).json({ error: `Feedback rate limit reached. Please wait ${limitCheck.retryAfterSeconds}s.` });
     return;
   }
 
-  const { businessId, rating, tags, comment, customerName, customerPhone, marketingConsent } = req.body;
-
-  if (!businessId || !rating || typeof rating !== 'number' || rating < 1 || rating > 5) {
-    res.status(400).json({ error: 'Valid business ID and numeric rating (1-5) are required' });
+  const businessId = req.params.id;
+  const business = db.getBusiness(businessId);
+  if (!business) {
+    res.status(404).json({ error: 'Business not found.' });
     return;
   }
 
-  const cleanPhone = customerPhone ? normalizeIndianPhone(customerPhone) : undefined;
-  if (cleanPhone && cleanPhone.length > 0 && !isValidIndianPhone(cleanPhone)) {
-    res.status(400).json({ error: 'Please enter a valid 10-digit Indian mobile number' });
+  const { rating, comment, customerName, customerPhone } = req.body;
+  if (!rating || typeof rating !== 'number' || rating < 1 || rating > 5) {
+    res.status(400).json({ error: 'Rating must be an integer between 1 and 5.' });
     return;
   }
 
-  const newFeedback: FeedbackSubmission = {
+  let sentiment: 'positive' | 'neutral' | 'negative' = 'neutral';
+  if (rating >= 4) sentiment = 'positive';
+  else if (rating <= 2) sentiment = 'negative';
+
+  const cleanPhone = customerPhone ? sanitizePhone(customerPhone) : undefined;
+  const newFeedback = {
     id: `fb-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
-    businessId: sanitizeString(businessId, 60),
-    rating: Math.round(rating),
-    tags: Array.isArray(tags) ? tags.map((t) => sanitizeString(t, 40)).slice(0, 8) : [],
-    comment: sanitizeString(comment, 500),
+    businessId,
+    rating,
+    sentiment,
+    category: 'General',
+    tags: [],
+    comment: sanitizeString(comment, 500) || 'Customer rating submitted',
     customerName: sanitizeString(customerName, 80) || undefined,
     customerPhone: cleanPhone,
-    marketingConsent: Boolean(marketingConsent),
     createdAt: new Date().toISOString(),
   };
 
-  inMemoryFeedback.unshift(newFeedback);
   try {
-    writeAtomicJsonSync(FEEDBACK_FILE, inMemoryFeedback);
-  } catch (err) {
-    inMemoryFeedback.shift();
-    res.status(500).json({ error: 'Storage persistence failure: feedback could not be saved.' });
-    return;
+    db.addFeedback(newFeedback);
+    res.status(201).json({ success: true, feedback: newFeedback });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to record feedback.' });
   }
-
-  res.status(201).json({
-    success: true,
-    message: 'Thank you for your feedback! The management has received it.',
-    feedbackId: newFeedback.id,
-  });
 });
 
-// Protected: Only business owner or admin may view customer feedback inbox
 app.get('/api/businesses/:id/feedback', checkBusinessAuth, (req: Request, res: Response): void => {
   const businessId = req.params.id;
-  const list = inMemoryFeedback.filter((f) => f.businessId === businessId);
-  const avgRating = list.length > 0 ? list.reduce((sum, f) => sum + f.rating, 0) / list.length : 5.0;
-
-  res.json({
-    feedback: list,
-    stats: {
-      total: list.length,
-      averageRating: parseFloat(avgRating.toFixed(1)),
-      breakdown: {
-        5: list.filter((f) => f.rating === 5).length,
-        4: list.filter((f) => f.rating === 4).length,
-        3: list.filter((f) => f.rating === 3).length,
-        2: list.filter((f) => f.rating === 2).length,
-        1: list.filter((f) => f.rating === 1).length,
-      },
-    },
-  });
+  const feedbackList = db.getFeedbackByBusiness(businessId);
+  res.json(feedbackList);
 });
 
-// 6. Fraud-Safe Customer Loyalty System
+// 6. Analytics Endpoints (Secured)
+app.get('/api/businesses/:id/analytics', checkBusinessAuth, (req: Request, res: Response): void => {
+  const businessId = req.params.id;
+  const stats = db.getAnalytics(businessId);
+  res.json(stats);
+});
+
+app.post('/api/businesses/:id/analytics/scan', (req: Request, res: Response): void => {
+  const businessId = req.params.id;
+  db.incrementAnalytics(businessId, 'scans');
+  res.json({ success: true });
+});
+
+// -------------------------------------------------------------
+// 7. LOYALTY & REWARDS SYSTEM
+// -------------------------------------------------------------
+
+// Public Loyalty Config Endpoint (Returns public rules without staff PIN)
 app.get('/api/loyalty/config/:businessId', (req: Request, res: Response): void => {
   const businessId = req.params.businessId;
-  let config = inMemoryLoyalty.configs[businessId];
-  if (!config) {
-    const { code, expiresAt } = generateDailyCheckinCode();
-    config = {
-      businessId,
-      enabled: true,
-      pointsPerVisit: 10,
-      minHoursBetweenVisits: 12,
-      staffPin: generateStaffPin(),
-      dailyCheckinCode: code,
-      dailyCodeExpiresAt: expiresAt,
-      rewards: [],
-    };
-    inMemoryLoyalty.configs[businessId] = config;
-  }
-
-  config = ensureFreshDailyCode(config);
-  inMemoryLoyalty.configs[businessId] = config;
-
-  const clientBizKey = req.headers['x-business-key'] as string;
-  const adminToken = req.headers['x-admin-token'] as string;
-  const business = inMemoryBusinesses[businessId];
-  const isOwner = Boolean(clientBizKey && business?.ownerKey && safeCompare(clientBizKey, business.ownerKey));
-  const isAdmin = validateAdminSession(adminToken);
-
-  if (isOwner || isAdmin) {
-    res.json(config);
-  } else {
-    // Sanitize config for public patron: do NOT leak staffPin
-    res.json({
-      businessId: config.businessId,
-      enabled: config.enabled,
-      pointsPerVisit: config.pointsPerVisit,
-      minHoursBetweenVisits: config.minHoursBetweenVisits,
-      rewards: config.rewards,
-      dailyCodeExpiresAt: config.dailyCodeExpiresAt,
-    });
-  }
-});
-
-app.post('/api/loyalty/config/:businessId', checkBusinessAuth, (req: Request, res: Response): void => {
-  const businessId = req.params.businessId;
-  const newConfig = req.body as LoyaltyConfig;
-
-  if (!newConfig || typeof newConfig.pointsPerVisit !== 'number' || newConfig.pointsPerVisit <= 0) {
-    res.status(400).json({ error: 'Valid pointsPerVisit (greater than 0) is required.' });
-    return;
-  }
-
-  const existingConfig = inMemoryLoyalty.configs[businessId];
-  const staffPin = newConfig.staffPin
-    ? String(newConfig.staffPin).trim().replace(/[^0-9]/g, '').slice(0, 8)
-    : (existingConfig?.staffPin || generateStaffPin());
-
-  const prevConfig = inMemoryLoyalty.configs[businessId];
-  const updatedConfig: LoyaltyConfig = {
-    ...existingConfig,
-    ...newConfig,
-    businessId,
-    staffPin,
-  };
-
-  inMemoryLoyalty.configs[businessId] = updatedConfig;
-  try {
-    writeAtomicJsonSync(LOYALTY_FILE, inMemoryLoyalty);
-  } catch (err) {
-    inMemoryLoyalty.configs[businessId] = prevConfig;
-    res.status(500).json({ error: 'Storage persistence failure: loyalty settings could not be saved.' });
-    return;
-  }
-
-  res.json({ success: true, config: updatedConfig });
-});
-
-// Customer Wallet Lookup (Protected: Requires Verified Customer Wallet Token OR In-Store Staff Verification)
-app.get('/api/loyalty/customer', (req: Request, res: Response): void => {
-  const businessId = req.query.businessId as string;
-  const rawPhone = sanitizePhone(req.query.phone);
-
-  if (!businessId || !rawPhone || !isValidIndianPhone(rawPhone)) {
-    res.status(400).json({ error: 'Valid business ID and 10-digit Indian mobile number are required' });
-    return;
-  }
-
-  const clientPhone = normalizeIndianPhone(rawPhone);
-  const config = inMemoryLoyalty.configs[businessId];
+  let config = db.getLoyaltyConfig(businessId);
   if (!config) {
     res.status(404).json({ error: 'Loyalty program not found for this business' });
     return;
   }
 
-  const businessWallets = inMemoryLoyalty.wallets[businessId] || {};
-  const wallet = businessWallets[clientPhone];
+  config = ensureFreshDailyCode(config);
+  db.upsertLoyaltyConfig(config);
 
-  // Authorization Check:
-  // 1. Admin session
+  res.json({
+    businessId: config.businessId,
+    enabled: config.enabled,
+    pointsPerVisit: config.pointsPerVisit,
+    minHoursBetweenVisits: config.minHoursBetweenVisits,
+    dailyCheckinCode: config.dailyCheckinCode,
+    dailyCodeExpiresAt: config.dailyCodeExpiresAt,
+    rewards: config.rewards,
+  });
+});
+
+// Protected Business Loyalty Config (Full access for Owner or Admin)
+app.get('/api/loyalty/config/:businessId/admin', checkBusinessAuth, (req: Request, res: Response): void => {
+  const businessId = req.params.businessId;
+  let config = db.getLoyaltyConfig(businessId);
+  if (!config) {
+    res.status(404).json({ error: 'Loyalty program not found' });
+    return;
+  }
+
+  config = ensureFreshDailyCode(config);
+  db.upsertLoyaltyConfig(config);
+  res.json(config);
+});
+
+// Customer Loyalty Wallet Lookup
+// - Staff PINs and wallet tokens are NEVER accepted via URL query parameters
+// - Phone number alone does NOT authorize access to private points and ledger history
+app.get('/api/loyalty/customer', (req: Request, res: Response): void => {
+  const urlCheck = hasUrlCredentials(req);
+  if (urlCheck.hasLeak) {
+    res.status(400).json({
+      error: `Security violation: credentials (${urlCheck.leakedParam}) cannot be sent in URL query parameters. Use authorization headers (x-staff-pin, x-wallet-token).`,
+    });
+    return;
+  }
+
+  const businessId = req.query.businessId as string;
+  const rawPhone = sanitizePhone(req.query.phone as string);
+
+  if (!businessId || !rawPhone || !isValidIndianPhone(rawPhone)) {
+    res.status(400).json({ error: 'Valid businessId and 10-digit Indian mobile number are required' });
+    return;
+  }
+
+  const cleanPhone = normalizeIndianPhone(rawPhone);
+  const config = db.getLoyaltyConfig(businessId);
+  if (!config) {
+    res.status(404).json({ error: 'Loyalty program not found' });
+    return;
+  }
+
+  const wallet = db.getWallet(businessId, cleanPhone);
+
+  // Authorization checks
   const adminToken = req.headers['x-admin-token'] as string;
   const isAdmin = validateAdminSession(adminToken);
 
-  // 2. Business Owner key (x-business-key)
   const clientBizKey = req.headers['x-business-key'] as string;
-  const business = inMemoryBusinesses[businessId];
+  const business = db.getBusiness(businessId);
   const isOwner = Boolean(clientBizKey && business?.ownerKey && safeCompare(clientBizKey, business.ownerKey));
 
-  // 3. Staff PIN (x-staff-pin or ?staffPin=)
-  const clientStaffPin = (req.headers['x-staff-pin'] as string) || (req.query.staffPin as string);
+  const clientStaffPin = req.headers['x-staff-pin'] as string;
   const isStaff = Boolean(clientStaffPin && config.staffPin && safeCompare(String(clientStaffPin).trim(), config.staffPin));
 
-  // 4. Customer Wallet Token (x-wallet-token or ?token=)
-  const clientWalletToken = (req.headers['x-wallet-token'] as string) || (req.query.token as string);
+  const clientWalletToken = req.headers['x-wallet-token'] as string;
   const isCustomerTokenValid = Boolean(
     clientWalletToken && wallet?.walletToken && safeCompare(clientWalletToken, wallet.walletToken)
   );
@@ -875,16 +815,14 @@ app.get('/api/loyalty/customer', (req: Request, res: Response): void => {
 
   const pointsBalance = wallet?.pointsBalance || 0;
   const totalVisits = wallet?.totalVisits || 0;
-  const recentHistory = inMemoryLoyalty.ledger
-    .filter((l) => l.businessId === businessId && l.customerPhone === clientPhone)
-    .slice(0, 10);
+  const recentHistory = db.getLedgerEntries(businessId, cleanPhone, 10);
 
   const eligibleRewards = (config.rewards || []).filter(
     (r) => r.isActive && pointsBalance >= r.pointsRequired
   );
 
   const customerData: CustomerLoyaltyWallet = {
-    phone: clientPhone,
+    phone: cleanPhone,
     name: wallet?.name,
     pointsBalance,
     totalVisits,
@@ -897,14 +835,34 @@ app.get('/api/loyalty/customer', (req: Request, res: Response): void => {
   res.json(customerData);
 });
 
-// Fraud-Safe Visit Check-in (Atomic Lock, Rate Limiting, Idempotency, Rotating Code)
+// Fraud-Safe Visit Check-in
+// - Mandatory idempotency key
+// - Transactional SQLite storage
+// - Per-business & per-client rate limiting
+// - Lockout on repeated brute-force attempts
 app.post('/api/loyalty/checkin', async (req: Request, res: Response): Promise<void> => {
-  const clientIp = getClientIp(req);
-  const { businessId, phone, customerName, staffPin, dailyCode, idempotencyKey } = req.body;
-  const rawPhone = sanitizePhone(phone);
+  const urlCheck = hasUrlCredentials(req);
+  if (urlCheck.hasLeak) {
+    res.status(400).json({
+      error: `Security violation: credentials (${urlCheck.leakedParam}) cannot be sent in URL query parameters.`,
+    });
+    return;
+  }
 
+  const clientIp = getClientIp(req);
+  const { businessId, phone, customerName, staffPin, dailyCode } = req.body;
+  const idempotencyKey = (req.headers['idempotency-key'] as string) || (req.headers['x-idempotency-key'] as string) || req.body.idempotencyKey;
+
+  if (!idempotencyKey || typeof idempotencyKey !== 'string' || !idempotencyKey.trim()) {
+    res.status(400).json({
+      error: 'Idempotency key is required for check-in operations. Provide an Idempotency-Key header or idempotencyKey body parameter.',
+    });
+    return;
+  }
+
+  const rawPhone = sanitizePhone(phone);
   if (!businessId || !rawPhone || !isValidIndianPhone(rawPhone)) {
-    res.status(400).json({ error: 'Valid 10-digit Indian customer mobile number is required' });
+    res.status(400).json({ error: 'Valid 10-digit Indian customer mobile number and business ID are required' });
     return;
   }
 
@@ -917,40 +875,41 @@ app.post('/api/loyalty/checkin', async (req: Request, res: Response): Promise<vo
     return;
   }
 
-  let config = inMemoryLoyalty.configs[businessId];
+  // Idempotency replay check
+  const cachedRecord = db.getIdempotencyRecord(idempotencyKey);
+  if (cachedRecord && cachedRecord.operation === 'checkin') {
+    res.json({
+      ...cachedRecord.response,
+      message: 'Check-in already recorded (idempotent)',
+    });
+    return;
+  }
+
+  let config = db.getLoyaltyConfig(businessId);
   if (!config) {
     res.status(404).json({ error: 'Loyalty program not found for this business' });
     return;
   }
 
   config = ensureFreshDailyCode(config);
-  inMemoryLoyalty.configs[businessId] = config;
+  db.upsertLoyaltyConfig(config);
 
   if (!config.enabled) {
     res.status(400).json({ error: 'Loyalty programme is currently paused by this business' });
     return;
   }
 
-  // Atomic Wallet Lock per Customer
+  // Mutex lock per customer
   const lockKey = `${businessId}:${cleanPhone}`;
   await withWalletLock(lockKey, async () => {
-    // Idempotency check: if request was already processed, return existing result
-    if (idempotencyKey) {
-      const existing = inMemoryLoyalty.ledger.find(
-        (l) => l.businessId === businessId && l.customerPhone === cleanPhone && l.idempotencyKey === idempotencyKey
-      );
-      if (existing) {
-        const wallet = inMemoryLoyalty.wallets[businessId]?.[cleanPhone] || { pointsBalance: 0, totalVisits: 0 };
-        res.json({
-          success: true,
-          pointsAwarded: existing.pointsChange,
-          newBalance: wallet.pointsBalance,
-          totalVisits: wallet.totalVisits,
-          walletToken: wallet.walletToken,
-          message: 'Check-in already recorded (idempotent)',
-        });
-        return;
-      }
+    // Re-check idempotency inside lock
+    const lockedCached = db.getIdempotencyRecord(idempotencyKey);
+    if (lockedCached) {
+      res.json({
+        ...lockedCached.response,
+        message: 'Check-in already recorded (idempotent)',
+      });
+      return;
     }
 
     // Verify Authorization: Verified Staff PIN OR Active Daily Rotating Code
@@ -960,30 +919,27 @@ app.post('/api/loyalty/checkin', async (req: Request, res: Response): Promise<vo
     const isDailyCodeValid = Boolean(dailyCode && isCodeNotExpired && safeCompare(String(dailyCode).trim(), config.dailyCheckinCode));
 
     if (!isStaffVerified && !isDailyCodeValid) {
+      if (staffPin) {
+        // Track PIN brute-force attempt
+        const failCheck = pinFailureLimiter.isAllowed(`${businessId}:pin_failures`);
+        if (!failCheck.allowed) {
+          res.status(429).json({
+            error: `Too many invalid staff credential attempts for this business. Locked for ${failCheck.retryAfterSeconds}s.`,
+          });
+          return;
+        }
+      }
       res.status(403).json({
         error: 'Invalid authorization. Please have staff enter their PIN or use the active daily store code.',
       });
       return;
     }
 
+    const existingWallet = db.getWallet(businessId, cleanPhone);
+
     // Verify Interval: Minimum hours between check-ins
-    if (!inMemoryLoyalty.wallets[businessId]) {
-      inMemoryLoyalty.wallets[businessId] = {};
-    }
-    const wallet = inMemoryLoyalty.wallets[businessId][cleanPhone] || {
-      phone: cleanPhone,
-      name: sanitizeString(customerName, 80) || undefined,
-      pointsBalance: 0,
-      totalVisits: 0,
-      walletToken: generateWalletToken(),
-    };
-
-    if (!wallet.walletToken) {
-      wallet.walletToken = generateWalletToken();
-    }
-
-    if (wallet.lastVisitAt) {
-      const hoursSinceLast = (Date.now() - new Date(wallet.lastVisitAt).getTime()) / (1000 * 3600);
+    if (existingWallet?.lastVisitAt) {
+      const hoursSinceLast = (Date.now() - new Date(existingWallet.lastVisitAt).getTime()) / (1000 * 3600);
       const minHours = config.minHoursBetweenVisits || 12;
       if (hoursSinceLast < minHours && !isStaffVerified) {
         res.status(429).json({
@@ -993,66 +949,62 @@ app.post('/api/loyalty/checkin', async (req: Request, res: Response): Promise<vo
       }
     }
 
-    // Award Points
     const pointsAwarded = Math.max(1, config.pointsPerVisit || 10);
-    wallet.pointsBalance += pointsAwarded;
-    wallet.totalVisits += 1;
-    wallet.lastVisitAt = new Date().toISOString();
-    if (customerName) wallet.name = sanitizeString(customerName, 80);
-
-    inMemoryLoyalty.wallets[businessId][cleanPhone] = wallet;
-
-    // Append to Auditable Ledger
-    const ledgerEntry = {
-      id: `led-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
-      businessId,
-      customerPhone: cleanPhone,
-      customerName: wallet.name,
-      type: 'visit_award' as const,
-      pointsChange: pointsAwarded,
-      staffVerified: isStaffVerified,
-      note: isStaffVerified ? 'Verified by staff PIN' : 'Verified via daily store code',
-      idempotencyKey: idempotencyKey ? String(idempotencyKey).slice(0, 64) : undefined,
-      createdAt: new Date().toISOString(),
-    };
-
-    inMemoryLoyalty.ledger.unshift(ledgerEntry);
-
-    // Track analytics
-    if (!inMemoryAnalytics[businessId]) {
-      inMemoryAnalytics[businessId] = { scans: 0, menuViews: 0, visits: 0 };
-    }
-    inMemoryAnalytics[businessId].visits += 1;
+    const activeToken = existingWallet?.walletToken || generateWalletToken();
 
     try {
-      writeAtomicJsonSync(LOYALTY_FILE, inMemoryLoyalty);
-      writeAtomicJsonSync(ANALYTICS_FILE, inMemoryAnalytics);
-    } catch (err) {
-      // Rollback on storage failure to ensure consistency
-      wallet.pointsBalance -= pointsAwarded;
-      wallet.totalVisits -= 1;
-      inMemoryLoyalty.ledger.shift();
-      inMemoryAnalytics[businessId].visits -= 1;
-      res.status(500).json({ error: 'Storage persistence failure: check-in could not be recorded.' });
-      return;
-    }
+      const result = db.processCheckin({
+        businessId,
+        phone: cleanPhone,
+        customerName: sanitizeString(customerName, 80) || undefined,
+        pointsAwarded,
+        isStaffVerified,
+        note: isStaffVerified ? 'Verified by staff PIN' : 'Verified via daily store code',
+        walletToken: activeToken,
+        idempotencyKey,
+      });
 
-    res.json({
-      success: true,
-      pointsAwarded,
-      newBalance: wallet.pointsBalance,
-      totalVisits: wallet.totalVisits,
-      walletToken: wallet.walletToken,
-      message: `🎉 Success! +${pointsAwarded} points added. New balance: ${wallet.pointsBalance} pts!`,
-    });
+      const responsePayload = {
+        success: true,
+        pointsAwarded: result.pointsAwarded,
+        newBalance: result.newBalance,
+        totalVisits: result.totalVisits,
+        walletToken: result.walletToken,
+        message: `🎉 Success! +${pointsAwarded} points added. New balance: ${result.newBalance} pts!`,
+      };
+
+      db.saveIdempotencyRecord(idempotencyKey, businessId, 'checkin', responsePayload);
+      syncDbToMemory();
+
+      res.json(responsePayload);
+    } catch (err: any) {
+      res.status(500).json({ error: `Storage persistence failure: ${err.message}` });
+    }
   });
 });
 
-// Reward Redemption (Requires Staff PIN, Atomic Lock, Double-Spending & Negative Balance Prevention)
+// Reward Redemption (Requires Staff PIN, Mandatory Idempotency, Transactional Double-Spending Prevention)
 app.post('/api/loyalty/redeem', async (req: Request, res: Response): Promise<void> => {
-  const { businessId, phone, rewardId, staffPin, idempotencyKey } = req.body;
-  const rawPhone = sanitizePhone(phone);
+  const urlCheck = hasUrlCredentials(req);
+  if (urlCheck.hasLeak) {
+    res.status(400).json({
+      error: `Security violation: credentials (${urlCheck.leakedParam}) cannot be sent in URL query parameters.`,
+    });
+    return;
+  }
 
+  const clientIp = getClientIp(req);
+  const { businessId, phone, rewardId, staffPin } = req.body;
+  const idempotencyKey = (req.headers['idempotency-key'] as string) || (req.headers['x-idempotency-key'] as string) || req.body.idempotencyKey;
+
+  if (!idempotencyKey || typeof idempotencyKey !== 'string' || !idempotencyKey.trim()) {
+    res.status(400).json({
+      error: 'Idempotency key is required for reward redemption. Provide an Idempotency-Key header or idempotencyKey body parameter.',
+    });
+    return;
+  }
+
+  const rawPhone = sanitizePhone(phone);
   if (!businessId || !rawPhone || !rewardId) {
     res.status(400).json({ error: 'Business ID, phone, and reward ID are required' });
     return;
@@ -1060,13 +1012,42 @@ app.post('/api/loyalty/redeem', async (req: Request, res: Response): Promise<voi
 
   const cleanPhone = normalizeIndianPhone(rawPhone);
 
-  const config = inMemoryLoyalty.configs[businessId];
+  // Rate Limiting on Redemption Attempts (Per IP & per business)
+  const limitCheck = redemptionLimiter.isAllowed(`${businessId}:${clientIp}`);
+  if (!limitCheck.allowed) {
+    res.status(429).json({ error: `Too many redemption attempts. Please wait ${limitCheck.retryAfterSeconds}s.` });
+    return;
+  }
+
+  // Check brute-force lockout for staff PIN on this business
+  const pinLockCheck = pinFailureLimiter.isAllowed(`${businessId}:pin_failures`);
+  if (!pinLockCheck.allowed) {
+    res.status(429).json({
+      error: `Too many invalid staff credential attempts for this business. Locked for ${pinLockCheck.retryAfterSeconds}s.`,
+    });
+    return;
+  }
+
+  // Idempotency replay check
+  const cachedRecord = db.getIdempotencyRecord(idempotencyKey);
+  if (cachedRecord && cachedRecord.operation === 'redeem') {
+    res.json({
+      ...cachedRecord.response,
+      message: 'Redemption already recorded (idempotent)',
+    });
+    return;
+  }
+
+  const config = db.getLoyaltyConfig(businessId);
   if (!config) {
     res.status(404).json({ error: 'Loyalty program not found for this business' });
     return;
   }
 
+  // Verify Staff PIN
   if (!staffPin || !safeCompare(String(staffPin).trim(), config.staffPin)) {
+    // Record failure in brute-force limiter
+    pinFailureLimiter.isAllowed(`${businessId}:pin_failures`);
     res.status(403).json({ error: 'Staff verification PIN is required to complete reward redemption' });
     return;
   }
@@ -1079,224 +1060,80 @@ app.post('/api/loyalty/redeem', async (req: Request, res: Response): Promise<voi
 
   const lockKey = `${businessId}:${cleanPhone}`;
   await withWalletLock(lockKey, async () => {
-    // Idempotency check
-    if (idempotencyKey) {
-      const existing = inMemoryLoyalty.ledger.find(
-        (l) => l.businessId === businessId && l.customerPhone === cleanPhone && l.idempotencyKey === idempotencyKey
-      );
-      if (existing) {
-        const wallet = inMemoryLoyalty.wallets[businessId]?.[cleanPhone] || { pointsBalance: 0 };
-        res.json({
-          success: true,
-          receiptCode: 'RDM-REPLAY',
-          rewardTitle: existing.rewardTitle,
-          pointsDeducted: Math.abs(existing.pointsChange),
-          remainingBalance: wallet.pointsBalance,
-          message: 'Redemption already recorded (idempotent)',
-        });
-        return;
-      }
-    }
-
-    const businessWallets = inMemoryLoyalty.wallets[businessId] || {};
-    const wallet = businessWallets[cleanPhone];
-
-    if (!wallet || wallet.pointsBalance < reward.pointsRequired) {
-      res.status(400).json({
-        error: `Insufficient points. You have ${wallet ? wallet.pointsBalance : 0} pts, but this reward requires ${reward.pointsRequired} pts.`,
+    // Re-check idempotency inside lock
+    const lockedCached = db.getIdempotencyRecord(idempotencyKey);
+    if (lockedCached) {
+      res.json({
+        ...lockedCached.response,
+        message: 'Redemption already recorded (idempotent)',
       });
       return;
     }
 
-    // Invariant: Balance must NEVER drop below zero
-    if (wallet.pointsBalance - reward.pointsRequired < 0) {
-      res.status(400).json({ error: 'Illegal transaction: balance cannot be negative' });
-      return;
-    }
-
-    // Deduct Points
-    wallet.pointsBalance -= reward.pointsRequired;
-    inMemoryLoyalty.wallets[businessId][cleanPhone] = wallet;
-
-    // Append Redemption to Auditable Ledger
     const receiptCode = `RDM-${Math.floor(100000 + Math.random() * 900000)}`;
-    const ledgerEntry = {
-      id: `led-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
-      businessId,
-      customerPhone: cleanPhone,
-      customerName: wallet.name,
-      type: 'reward_redemption' as const,
-      pointsChange: -reward.pointsRequired,
-      rewardTitle: reward.title,
-      staffVerified: true,
-      note: `Redeemed: ${reward.title} (Receipt: ${receiptCode})`,
-      idempotencyKey: idempotencyKey ? String(idempotencyKey).slice(0, 64) : undefined,
-      createdAt: new Date().toISOString(),
-    };
-
-    inMemoryLoyalty.ledger.unshift(ledgerEntry);
 
     try {
-      writeAtomicJsonSync(LOYALTY_FILE, inMemoryLoyalty);
-    } catch (err) {
-      // Rollback
-      wallet.pointsBalance += reward.pointsRequired;
-      inMemoryLoyalty.ledger.shift();
-      res.status(500).json({ error: 'Storage persistence failure: redemption could not be recorded.' });
-      return;
-    }
+      const result = db.processRedemption({
+        businessId,
+        phone: cleanPhone,
+        rewardId,
+        rewardTitle: reward.title,
+        pointsRequired: reward.pointsRequired,
+        receiptCode,
+        idempotencyKey,
+      });
 
-    res.json({
-      success: true,
-      receiptCode,
-      rewardTitle: reward.title,
-      pointsDeducted: reward.pointsRequired,
-      remainingBalance: wallet.pointsBalance,
-      message: `🎉 Reward "${reward.title}" redeemed! Please hand this treat to the customer.`,
-    });
+      const responsePayload = {
+        success: true,
+        receiptCode: result.receiptCode,
+        rewardTitle: result.rewardTitle,
+        pointsDeducted: result.pointsDeducted,
+        remainingBalance: result.remainingBalance,
+        message: `🎉 Reward claimed! ${reward.title} redeemed. Balance: ${result.remainingBalance} pts.`,
+      };
+
+      db.saveIdempotencyRecord(idempotencyKey, businessId, 'redeem', responsePayload);
+      syncDbToMemory();
+
+      res.json(responsePayload);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
   });
 });
 
-// 7. Business Analytics Endpoint (Protected)
-app.get('/api/analytics/:businessId', checkBusinessAuth, (req: Request, res: Response): void => {
-  const businessId = req.params.businessId;
-  const storeAnalytics = inMemoryAnalytics[businessId] || { scans: 0, menuViews: 0, visits: 0 };
-
-  const feedbackList = inMemoryFeedback.filter((f) => f.businessId === businessId);
-  const avgRating = feedbackList.length > 0
-    ? feedbackList.reduce((sum, f) => sum + f.rating, 0) / feedbackList.length
-    : 5.0;
-
-  const businessLedger = inMemoryLoyalty.ledger.filter((l) => l.businessId === businessId);
-  const pointsIssued = businessLedger
-    .filter((l) => l.type === 'visit_award')
-    .reduce((sum, l) => sum + l.pointsChange, 0);
-
-  const rewardsRedeemed = businessLedger.filter((l) => l.type === 'reward_redemption').length;
-
-  const recentActivity = [
-    ...feedbackList.slice(0, 4).map((f) => ({
-      id: f.id,
-      type: 'feedback' as const,
-      label: `New ${f.rating}★ rating from ${f.customerName || 'Customer'}`,
-      timestamp: f.createdAt,
-    })),
-    ...businessLedger.slice(0, 4).map((l) => ({
-      id: l.id,
-      type: (l.type === 'reward_redemption' ? 'redeem' : 'visit') as ('redeem' | 'visit'),
-      label: l.type === 'reward_redemption' ? `Redeemed: ${l.rewardTitle}` : `Visit check-in by ${l.customerPhone.slice(0, 2)}******${l.customerPhone.slice(-2)}`,
-      timestamp: l.createdAt,
-    })),
-  ].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 6);
-
-  const summary: AnalyticsSummary = {
-    businessId,
-    totalQrScans: storeAnalytics.scans + storeAnalytics.menuViews,
-    totalMenuViews: storeAnalytics.menuViews,
-    totalFeedbackCount: feedbackList.length,
-    averageRating: parseFloat(avgRating.toFixed(1)),
-    totalLoyaltyVisits: storeAnalytics.visits,
-    totalPointsIssued: pointsIssued,
-    totalRewardsRedeemed: rewardsRedeemed,
-    recentActivity,
-  };
-
-  res.json(summary);
-});
-
-// Analytics Tracking Endpoint (Public, Sanitized Event Types)
-app.post('/api/analytics/track', (req: Request, res: Response): void => {
-  const { businessId, eventType } = req.body;
-  if (!businessId || typeof businessId !== 'string') {
-    res.status(400).json({ error: 'Valid businessId is required' });
-    return;
-  }
-
-  if (eventType !== 'qr_scan' && eventType !== 'menu_view') {
-    res.status(400).json({ error: 'Invalid eventType' });
-    return;
-  }
-
-  if (!inMemoryAnalytics[businessId]) {
-    inMemoryAnalytics[businessId] = { scans: 0, menuViews: 0, visits: 0 };
-  }
-
-  if (eventType === 'qr_scan') {
-    inMemoryAnalytics[businessId].scans += 1;
-  } else if (eventType === 'menu_view') {
-    inMemoryAnalytics[businessId].menuViews += 1;
-  }
-
-  try {
-    writeAtomicJsonSync(ANALYTICS_FILE, inMemoryAnalytics);
-  } catch (e) {
-    // Non-fatal
-  }
-  res.json({ success: true });
-});
-
-// 8. Public API Integration (TheMealDB - Food & Dish Auto-Search)
-app.get('/api/integrations/food-search', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const query = sanitizeString(req.query.query, 60);
-    if (!query) {
-      res.json({ results: [] });
-      return;
-    }
-
-    const apiUrl = `https://www.themealdb.com/api/json/v1/1/search.php?s=${encodeURIComponent(query)}`;
-    const response = await fetch(apiUrl);
-    if (!response.ok) {
-      res.json({ results: [] });
-      return;
-    }
-
-    const data = await response.json();
-    const meals = (data.meals || []).slice(0, 5).map((m: any) => ({
-      name: sanitizeString(m.strMeal, 80),
-      category: sanitizeString(m.strCategory, 50),
-      area: sanitizeString(m.strArea, 50),
-      description: m.strInstructions ? sanitizeString(m.strInstructions, 150) + '...' : '',
-      thumbnail: m.strMealThumb,
-    }));
-
-    res.json({ results: meals });
-  } catch (err: any) {
-    console.error('TheMealDB API error:', err);
-    res.json({ results: [] });
-  }
-});
-
-// 9. Promotional Kit Generation (Gemini AI with model gemini-3.8-flash)
+// -------------------------------------------------------------
+// 8. AI PROMOTIONAL KIT GENERATOR
+// -------------------------------------------------------------
 app.post('/api/generate-promo-kit', async (req: Request, res: Response): Promise<void> => {
   try {
     const clientIp = getClientIp(req);
     const limitCheck = promoGenerationLimiter.isAllowed(clientIp);
     if (!limitCheck.allowed) {
-      res.status(429).json({ error: `Promotional kit rate limit exceeded. Please wait ${limitCheck.retryAfterSeconds}s.` });
+      res.status(429).json({ error: `Generation limit reached. Please wait ${limitCheck.retryAfterSeconds}s.` });
       return;
     }
 
-    const profile = req.body as BusinessProfile;
+    const profile = req.body as Partial<BusinessProfile>;
     if (!profile.businessName || !profile.category) {
       res.status(400).json({ error: 'Business name and category are required.' });
       return;
     }
 
-    const langName =
-      profile.preferredLanguage === 'hindi'
-        ? 'Hindi (Shuddh/Colloquial)'
-        : profile.preferredLanguage === 'hinglish'
-        ? 'Hinglish (Hindi words written in English alphabet)'
-        : 'Indian English';
-
     const safeBizName = sanitizeString(profile.businessName, 80);
-    const safeCategory = sanitizeString(profile.category, 50);
+    const safeCategory = sanitizeString(profile.category, 40);
 
     if (aiClient) {
       try {
-        const prompt = `You are DukaanBoost AI, an expert retail growth copywriter and marketing director for local Indian neighborhood small businesses.
-Create a complete high-converting promotional marketing campaign kit for the following business:
+        const langMap: Record<string, string> = {
+          hinglish: 'Hinglish (natural mix of casual Hindi and conversational English for Indian retail)',
+          hindi: 'Pure Shuddh Hindi in Devanagari script',
+          english: 'High-converting Indian English retail copy',
+        };
+        const langName = langMap[profile.preferredLanguage || 'hinglish'] || langMap.hinglish;
+
+        const prompt = `You are DukaanBoost AI, the expert local marketing strategist for Indian small businesses.
+Generate an actionable, high-conversion promotional campaign pack for:
 - Business Name: ${safeBizName}
 - Category: ${safeCategory}
 - City / Area: ${sanitizeString(profile.city, 60) || 'Local neighborhood'}
@@ -1357,7 +1194,7 @@ Return a valid JSON object matching this schema:
           const finalKit: PromoKit = {
             businessName: safeBizName,
             category: safeCategory,
-            language: profile.preferredLanguage,
+            language: profile.preferredLanguage || 'hinglish',
             headlines: parsed.headlines || [],
             whatsappMessages: parsed.whatsappMessages || [],
             captions: parsed.captions || [],
@@ -1397,7 +1234,9 @@ Return a valid JSON object matching this schema:
   }
 });
 
-// 10. Orders & Manual UPI Checkout (Unguessable IDs, Access Token, Customer Authorization)
+// -------------------------------------------------------------
+// 9. ORDERS & MANUAL UPI CHECKOUT
+// -------------------------------------------------------------
 app.post('/api/orders', (req: Request, res: Response): void => {
   try {
     const clientIp = getClientIp(req);
@@ -1485,6 +1324,14 @@ app.post('/api/orders', (req: Request, res: Response): void => {
 
 // Submit UPI Reference (Restricted to Customer with Valid Order Access Token; Never Trust Phone-Only)
 app.post('/api/orders/:id/submit-upi-ref', (req: Request, res: Response): void => {
+  const urlCheck = hasUrlCredentials(req);
+  if (urlCheck.hasLeak) {
+    res.status(400).json({
+      error: `Security violation: credentials (${urlCheck.leakedParam}) cannot be sent in URL query parameters.`,
+    });
+    return;
+  }
+
   const orderId = req.params.id;
   const { upiTransactionRef, token } = req.body;
 
@@ -1518,7 +1365,6 @@ app.post('/api/orders/:id/submit-upi-ref', (req: Request, res: Response): void =
 
   order.upiTransactionRef = cleanRef;
   order.updatedAt = new Date().toISOString();
-  // Payment status strictly remains pending until verified by authorized seller/staff
   order.paymentStatus = 'pending';
 
   try {
@@ -1539,7 +1385,16 @@ app.post('/api/orders/:id/submit-upi-ref', (req: Request, res: Response): void =
 });
 
 // Customer-Scoped Order Lookup (Requires Order Access Token; Phone-Only Lookups Strictly Forbidden)
+// Credentials in URL query parameters are rejected
 app.get('/api/orders/:id', (req: Request, res: Response): void => {
+  const urlCheck = hasUrlCredentials(req);
+  if (urlCheck.hasLeak) {
+    res.status(400).json({
+      error: `Security violation: order token cannot be sent in URL query parameters. Pass via x-order-token HTTP header.`,
+    });
+    return;
+  }
+
   const orderId = req.params.id;
   const order = inMemoryOrders.find((o) => o.id.toLowerCase() === orderId.toLowerCase());
   if (!order) {
@@ -1550,7 +1405,7 @@ app.get('/api/orders/:id', (req: Request, res: Response): void => {
   const adminToken = req.headers['x-admin-token'] as string;
   const isAdmin = validateAdminSession(adminToken);
 
-  const clientToken = (req.headers['x-order-token'] as string) || (req.query.token as string);
+  const clientToken = req.headers['x-order-token'] as string;
   const hasValidToken = Boolean(clientToken && order.orderAccessToken && safeCompare(clientToken, order.orderAccessToken));
 
   if (!isAdmin && !hasValidToken) {
@@ -1592,7 +1447,9 @@ app.get('/api/orders/:id', (req: Request, res: Response): void => {
   });
 });
 
-// 11. Admin Endpoints (Expiring Sessions, Login Rate Limiting, Logout)
+// -------------------------------------------------------------
+// 10. ADMIN PORTAL ENDPOINTS
+// -------------------------------------------------------------
 app.post('/api/admin/login', (req: Request, res: Response): void => {
   const clientIp = getClientIp(req);
 
@@ -1752,7 +1609,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 DukaanBoost AI Security-Remediated Server running on port ${PORT}`);
+    console.log(`🚀 DukaanBoost AI Server running on port ${PORT}`);
   });
 }
 
@@ -1776,6 +1633,11 @@ export function resetTestStateForTesting() {
   };
   inMemoryAnalytics = {};
   clearAllAdminSessions();
+  loginLimiter.clear();
+  loyaltyCheckinLimiter.clear();
+  redemptionLimiter.clear();
+  pinFailureLimiter.clear();
+  businessCreationLimiter.clear();
 }
 
 export {

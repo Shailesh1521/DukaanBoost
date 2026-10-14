@@ -49,14 +49,13 @@ export const OrderLookupModal: React.FC<OrderLookupModalProps> = ({
       const cachedToken = orderTokenInput.trim() || localStorage.getItem(`dkb_order_token_${cleanId}`) || '';
 
       const queryParams = new URLSearchParams();
-      if (cachedToken) {
-        queryParams.set('token', cachedToken);
-      } else {
-        // Safe public non-PII tracking
+      if (!cachedToken) {
+        // Safe public non-PII tracking when token is not present
         queryParams.set('public', 'true');
       }
 
-      const res = await fetch(`/api/orders/${encodeURIComponent(cleanId)}?${queryParams.toString()}`, {
+      const queryString = queryParams.toString() ? `?${queryParams.toString()}` : '';
+      const res = await fetch(`/api/orders/${encodeURIComponent(cleanId)}${queryString}`, {
         headers: {
           'x-order-token': cachedToken,
         },
