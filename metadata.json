@@ -1,0 +1,6 @@
+{
+  "name": "DukaanBoost AI",
+  "description": "AI-powered promotional marketing kit & poster studio for Indian small businesses. Generate WhatsApp promos, social captions, offer ideas, and high-res posters in English, Hindi & Hinglish.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
