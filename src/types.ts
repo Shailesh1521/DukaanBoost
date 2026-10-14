@@ -132,6 +132,7 @@ export interface CustomerLoyaltyWallet {
   pointsBalance: number;
   totalVisits: number;
   lastVisitAt?: string;
+  walletToken?: string;
   eligibleRewards: LoyaltyReward[];
   recentHistory: LoyaltyLedgerEntry[];
 }

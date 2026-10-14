@@ -22,11 +22,14 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
   business,
   onBackToDashboard,
 }) => {
-  const [phoneInput, setPhoneInput] = useState<string>('9826011111');
+  const [phoneInput, setPhoneInput] = useState<string>(() => {
+    return typeof window !== 'undefined' ? (localStorage.getItem('dkb_customer_phone') || '') : '';
+  });
   const [wallet, setWallet] = useState<CustomerLoyaltyWallet | null>(null);
   const [config, setConfig] = useState<LoyaltyConfig | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [authRequired, setAuthRequired] = useState<boolean>(false);
 
   // Check-in modal state
   const [isCheckinModalOpen, setIsCheckinModalOpen] = useState<boolean>(false);
@@ -48,10 +51,35 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
 
     setLoading(true);
     setError(null);
+    setAuthRequired(false);
 
     try {
-      const res = await fetch(`/api/loyalty/customer?businessId=${bizId}&phone=${cleanPhone}`);
-      if (!res.ok) throw new Error('Could not load wallet.');
+      const tokenKey = `dkb_wallet_token_${bizId}_${cleanPhone}`;
+      const savedToken = typeof window !== 'undefined' ? localStorage.getItem(tokenKey) : null;
+
+      const res = await fetch(`/api/loyalty/customer?businessId=${bizId}&phone=${cleanPhone}`, {
+        headers: {
+          'x-wallet-token': savedToken || '',
+        },
+      });
+
+      if (res.status === 403) {
+        setAuthRequired(true);
+        setWallet(null);
+        // Still fetch public config for rewards listing
+        const cfgRes = await fetch(`/api/loyalty/config/${bizId}`);
+        if (cfgRes.ok) {
+          const cfgData = await cfgRes.json();
+          setConfig(cfgData);
+        }
+        return;
+      }
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Could not load wallet.');
+      }
+
       const data = await res.json();
       setWallet(data);
 
@@ -68,7 +96,9 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
   };
 
   useEffect(() => {
-    fetchWallet(phoneInput);
+    if (phoneInput && phoneInput.length >= 10) {
+      fetchWallet(phoneInput);
+    }
   }, [business.id]);
 
   const handlePhoneSubmit = (e: React.FormEvent) => {
@@ -79,7 +109,8 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
   // Perform Check-in
   const handleCheckin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!verifyCodeInput.trim() || !wallet) return;
+    const cleanPhone = (wallet?.phone || phoneInput).replace(/[^0-9]/g, '');
+    if (!verifyCodeInput.trim() || !cleanPhone) return;
 
     setCheckinLoading(true);
     setError(null);
@@ -89,8 +120,8 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
       const bizId = business.id || 'chai-shai-cafe';
       const payload: any = {
         businessId: bizId,
-        phone: wallet.phone,
-        customerName: wallet.name,
+        phone: cleanPhone,
+        customerName: wallet?.name,
       };
 
       if (checkinMethod === 'daily_code') {
@@ -108,10 +139,18 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Check-in failed');
 
+      // Save verified wallet token and phone to browser storage
+      if (data.walletToken) {
+        const tokenKey = `dkb_wallet_token_${bizId}_${cleanPhone}`;
+        localStorage.setItem(tokenKey, data.walletToken);
+        localStorage.setItem('dkb_customer_phone', cleanPhone);
+      }
+
       setCheckinSuccessMsg(data.message);
       setIsCheckinModalOpen(false);
       setVerifyCodeInput('');
-      fetchWallet(wallet.phone);
+      setAuthRequired(false);
+      fetchWallet(cleanPhone);
     } catch (err: any) {
       setError(err.message || 'Check-in failed.');
     } finally {
@@ -228,6 +267,31 @@ export const CustomerLoyaltyView: React.FC<CustomerLoyaltyViewProps> = ({
             <p className="text-[11px] text-slate-600">
               Show this screen to the counter staff to receive your <strong>{redemptionReceipt.rewardTitle}</strong>.
             </p>
+          </div>
+        )}
+
+        {/* AUTH REQUIRED NOTICE */}
+        {authRequired && (
+          <div className="bg-gradient-to-br from-slate-900 to-slate-800 text-white p-6 rounded-3xl shadow-lg border border-emerald-500/30 space-y-4 text-center">
+            <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 mx-auto">
+              <Lock className="w-6 h-6" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="font-bold text-sm text-white">Loyalty Pass Verification Required</h3>
+              <p className="text-xs text-slate-300">
+                To protect customer balances and privacy, check in with today's in-store daily code (displayed at the counter) or ask staff to unlock your pass.
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                setIsCheckinModalOpen(true);
+                setError(null);
+              }}
+              className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Sparkles className="w-4 h-4 text-yellow-200" />
+              <span>Enter Store Code to Check In & Unlock</span>
+            </button>
           </div>
         )}
 

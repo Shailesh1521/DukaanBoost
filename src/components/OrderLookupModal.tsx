@@ -21,12 +21,16 @@ export const OrderLookupModal: React.FC<OrderLookupModalProps> = ({
   const [orderData, setOrderData] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [orderTokenInput, setOrderTokenInput] = useState<string>('');
+
   useEffect(() => {
     if (isOpen) {
       const lastId = defaultOrderId || localStorage.getItem('dkb_last_order_id') || '';
-      const lastPhone = localStorage.getItem('dkb_last_order_phone') || '';
-      if (lastId) setOrderIdInput(lastId);
-      if (lastPhone) setCustomerPhoneInput(lastPhone);
+      if (lastId) {
+        setOrderIdInput(lastId);
+        const cached = localStorage.getItem(`dkb_order_token_${lastId}`);
+        if (cached) setOrderTokenInput(cached);
+      }
     }
   }, [isOpen, defaultOrderId]);
 
@@ -42,12 +46,15 @@ export const OrderLookupModal: React.FC<OrderLookupModalProps> = ({
 
     try {
       const cleanId = orderIdInput.trim();
-      const cleanPhone = customerPhoneInput.trim();
-      const cachedToken = localStorage.getItem(`dkb_order_token_${cleanId}`) || '';
+      const cachedToken = orderTokenInput.trim() || localStorage.getItem(`dkb_order_token_${cleanId}`) || '';
 
       const queryParams = new URLSearchParams();
-      if (cleanPhone) queryParams.set('phone', cleanPhone);
-      if (cachedToken) queryParams.set('token', cachedToken);
+      if (cachedToken) {
+        queryParams.set('token', cachedToken);
+      } else {
+        // Safe public non-PII tracking
+        queryParams.set('public', 'true');
+      }
 
       const res = await fetch(`/api/orders/${encodeURIComponent(cleanId)}?${queryParams.toString()}`, {
         headers: {
@@ -60,7 +67,7 @@ export const OrderLookupModal: React.FC<OrderLookupModalProps> = ({
           throw new Error('Order not found. Please double-check your Order Reference ID (e.g. DKB-2026-XXXX).');
         }
         if (res.status === 403) {
-          throw new Error('Security verification required. Please enter the 10-digit mobile number used when placing this order.');
+          throw new Error('Customer order access token required. Please check your order confirmation receipt.');
         }
         throw new Error('Could not fetch order details. Please try again.');
       }
@@ -112,13 +119,13 @@ export const OrderLookupModal: React.FC<OrderLookupModalProps> = ({
 
             <div>
               <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">
-                Your Registered Mobile Number (for customer verification)
+                Order Access Token (Optional for basic status; required for full details)
               </label>
               <input
-                type="tel"
-                value={customerPhoneInput}
-                onChange={(e) => setCustomerPhoneInput(e.target.value)}
-                placeholder="e.g. 9826012345"
+                type="text"
+                value={orderTokenInput}
+                onChange={(e) => setOrderTokenInput(e.target.value)}
+                placeholder="Auto-filled from receipt or enter token"
                 className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-sm font-mono focus:outline-hidden focus:ring-2 focus:ring-orange-500"
               />
             </div>

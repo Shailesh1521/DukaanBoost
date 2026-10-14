@@ -66,8 +66,7 @@ export default function App() {
     visualStyle: 'chai_bites',
     brandColor: '#ea580c',
     googleReviewUrl: 'https://g.page/r/sample-chai-shai-indore/review',
-    ownerKey: 'biz_key_chai_shai_sample_demo_8921',
-    staffPin: '8249',
+    ownerKey: typeof window !== 'undefined' ? (localStorage.getItem('dkb_biz_owner_key_chai-shai-cafe') || undefined) : undefined,
     createdAt: '2026-10-14T05:00:00.000Z',
   });
 

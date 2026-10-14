@@ -143,8 +143,13 @@ export const LoyaltyManager: React.FC<LoyaltyManagerProps> = ({
 
     try {
       const bizId = business.id || 'chai-shai-cafe';
-      const res = await fetch(`/api/loyalty/customer?businessId=${bizId}&phone=${cleanPhone}`);
-      if (!res.ok) throw new Error('Customer lookup failed');
+      const res = await fetch(`/api/loyalty/customer?businessId=${bizId}&phone=${cleanPhone}`, {
+        headers: {
+          'x-business-key': business.ownerKey || '',
+          'x-staff-pin': config?.staffPin || '',
+        },
+      });
+      if (!res.ok) throw new Error('Customer lookup failed. Staff authorization required.');
       const data = await res.json();
       setSearchedCustomer(data);
       if (data.recentHistory) setLedgerEntries(data.recentHistory);
@@ -176,7 +181,12 @@ export const LoyaltyManager: React.FC<LoyaltyManagerProps> = ({
 
       setManualCheckinSuccess(`Approved! +${data.pointsAwarded} pts awarded. Balance: ${data.newBalance} pts`);
       // Refresh customer data
-      const refreshRes = await fetch(`/api/loyalty/customer?businessId=${bizId}&phone=${searchedCustomer.phone}`);
+      const refreshRes = await fetch(`/api/loyalty/customer?businessId=${bizId}&phone=${searchedCustomer.phone}`, {
+        headers: {
+          'x-business-key': business.ownerKey || '',
+          'x-staff-pin': config?.staffPin || '',
+        },
+      });
       const refreshData = await refreshRes.json();
       setSearchedCustomer(refreshData);
       setTimeout(() => setManualCheckinSuccess(null), 3000);

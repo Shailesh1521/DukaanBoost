@@ -299,10 +299,9 @@ export const BusinessOverview: React.FC<BusinessOverviewProps> = ({
               </label>
               <input
                 type="text"
-                required
-                value={formData.staffPin || '1234'}
+                value={formData.staffPin || ''}
                 onChange={(e) => setFormData({ ...formData, staffPin: e.target.value })}
-                placeholder="4-digit PIN (e.g. 1234)"
+                placeholder="Enter 4-8 digit staff PIN"
                 className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono font-bold text-emerald-800"
               />
             </div>
