@@ -24,8 +24,15 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ business }) => {
   useEffect(() => {
     const bizId = business.id || 'chai-shai-cafe';
     setLoading(true);
-    fetch(`/api/analytics/${bizId}`)
-      .then((res) => res.json())
+    fetch(`/api/analytics/${bizId}`, {
+      headers: {
+        'x-business-key': business.ownerKey || '',
+      },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Unauthorized or failed to load analytics');
+        return res.json();
+      })
       .then((resData) => {
         if (resData) setData(resData);
       })

@@ -67,6 +67,24 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
   if (!isOpen) return null;
 
+  const handleLogout = async () => {
+    try {
+      if (adminToken) {
+        await fetch('/api/admin/logout', {
+          method: 'POST',
+          headers: { 'x-admin-token': adminToken },
+        });
+      }
+    } catch (err) {
+      console.warn('Logout network error:', err);
+    } finally {
+      setIsAuthenticated(false);
+      setAdminToken('');
+      setPasscode('');
+      setOrders([]);
+    }
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
@@ -75,14 +93,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const res = await fetch('/api/admin/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passcode }),
+        body: JSON.stringify({ passcode: passcode.trim() }),
       });
 
+      const data = await res.json();
       if (!res.ok) {
-        throw new Error('Invalid passcode. Access denied.');
+        throw new Error(data.error || 'Invalid passcode. Access denied.');
       }
 
-      const data = await res.json();
       setAdminToken(data.token);
       setIsAuthenticated(true);
       fetchAdminData(data.token);
@@ -97,6 +115,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       const ordersRes = await fetch('/api/admin/orders', {
         headers: { 'x-admin-token': token },
       });
+      if (ordersRes.status === 401) {
+        handleLogout();
+        setAuthError('Admin session expired. Please re-authenticate.');
+        return;
+      }
       if (ordersRes.ok) {
         const data = await ordersRes.json();
         setOrders(data.orders || []);
@@ -196,12 +219,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             </div>
           </div>
 
-          <button
-            onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {isAuthenticated && (
+              <button
+                onClick={handleLogout}
+                className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-colors cursor-pointer"
+              >
+                Log Out
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Content Area */}
@@ -215,7 +248,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             <div>
               <h3 className="font-display font-extrabold text-2xl text-slate-900">Admin Authentication</h3>
               <p className="text-xs text-slate-500 mt-1">
-                Enter your administrative passcode to manage real customer orders.
+                Enter your administrative passcode to manage customer orders & pricing.
               </p>
             </div>
 
@@ -232,7 +265,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 required
                 value={passcode}
                 onChange={(e) => setPasscode(e.target.value)}
-                placeholder="Enter admin passcode (Default: dukaan2026)"
+                placeholder="Enter administrative passcode"
                 className="w-full px-4 py-3 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-orange-500 font-mono"
               />
 

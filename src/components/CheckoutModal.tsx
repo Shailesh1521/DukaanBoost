@@ -180,8 +180,21 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       }
 
       const data = await response.json();
-      setCreatedOrder(data.order);
-      onOrderSuccess(data.order);
+      const orderWithToken = {
+        ...data.order,
+        orderAccessToken: data.orderAccessToken,
+      };
+      setCreatedOrder(orderWithToken);
+      try {
+        if (data.orderAccessToken) {
+          localStorage.setItem(`dkb_order_token_${data.order.id}`, data.orderAccessToken);
+          localStorage.setItem(`dkb_last_order_id`, data.order.id);
+          localStorage.setItem(`dkb_last_order_phone`, data.order.customerPhone);
+        }
+      } catch (storageErr) {
+        console.warn('Could not cache order token in localStorage:', storageErr);
+      }
+      onOrderSuccess(orderWithToken);
     } catch (err: any) {
       console.error('Error creating order:', err);
       setError(err.message || 'Could not place order. Please try again.');
@@ -203,16 +216,24 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     try {
       const response = await fetch(`/api/orders/${createdOrder.id}/submit-upi-ref`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ upiTransactionRef: upiRefInput.trim() }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-order-token': createdOrder.orderAccessToken || '',
+        },
+        body: JSON.stringify({
+          upiTransactionRef: upiRefInput.trim(),
+          token: createdOrder.orderAccessToken,
+          phone: createdOrder.customerPhone,
+        }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to update UPI reference.');
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to update UPI reference.');
       }
 
       const data = await response.json();
-      setCreatedOrder(data.order);
+      setCreatedOrder((prev) => prev ? { ...prev, upiTransactionRef: upiRefInput.trim() } : null);
       setUpiRefSaved(true);
     } catch (err: any) {
       setError(err.message || 'Failed to submit UPI reference.');

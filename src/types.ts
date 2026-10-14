@@ -47,6 +47,7 @@ export interface BusinessProfile {
   brandColor?: string;
   googleReviewUrl?: string;
   staffPin?: string;
+  ownerKey?: string;
   createdAt?: string;
 }
 
@@ -231,6 +232,7 @@ export interface Order {
   paymentStatus: PaymentStatus;
   fulfillmentStatus: FulfillmentStatus;
   upiTransactionRef?: string;
+  orderAccessToken?: string;
   createdAt: string;
   updatedAt: string;
   adminNotes?: string;

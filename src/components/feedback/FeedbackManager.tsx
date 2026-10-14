@@ -36,8 +36,15 @@ export const FeedbackManager: React.FC<FeedbackManagerProps> = ({
   const fetchFeedback = () => {
     const bizId = business.id || 'chai-shai-cafe';
     setLoading(true);
-    fetch(`/api/businesses/${bizId}/feedback`)
-      .then((res) => res.json())
+    fetch(`/api/businesses/${bizId}/feedback`, {
+      headers: {
+        'x-business-key': business.ownerKey || '',
+      },
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Unauthorized or failed to load feedback');
+        return res.json();
+      })
       .then((data) => {
         if (data && data.feedback) {
           setFeedbackList(data.feedback);

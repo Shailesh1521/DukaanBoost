@@ -40,11 +40,17 @@ export const BusinessOverview: React.FC<BusinessOverviewProps> = ({
     try {
       const res = await fetch('/api/businesses', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-business-key': business.ownerKey || '',
+        },
         body: JSON.stringify(formData),
       });
 
-      if (!res.ok) throw new Error('Failed to update business profile.');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to update business profile.');
+      }
       const data = await res.json();
       onUpdateBusiness(data);
       setSaveSuccess('Business profile & settings saved successfully!');

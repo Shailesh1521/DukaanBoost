@@ -51,7 +51,11 @@ export const LoyaltyManager: React.FC<LoyaltyManagerProps> = ({
   const fetchConfig = () => {
     const bizId = business.id || 'chai-shai-cafe';
     setLoading(true);
-    fetch(`/api/loyalty/config/${bizId}`)
+    fetch(`/api/loyalty/config/${bizId}`, {
+      headers: {
+        'x-business-key': business.ownerKey || '',
+      },
+    })
       .then((res) => res.json())
       .then((data) => {
         if (data) setConfig(data);
@@ -75,11 +79,17 @@ export const LoyaltyManager: React.FC<LoyaltyManagerProps> = ({
       const bizId = business.id || 'chai-shai-cafe';
       const res = await fetch(`/api/loyalty/config/${bizId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-business-key': business.ownerKey || '',
+        },
         body: JSON.stringify(config),
       });
 
-      if (!res.ok) throw new Error('Failed to update loyalty settings.');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to update loyalty settings.');
+      }
       setSaveSuccess('Loyalty rules and rewards updated successfully!');
       setTimeout(() => setSaveSuccess(null), 3000);
     } catch (err: any) {

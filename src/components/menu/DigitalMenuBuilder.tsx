@@ -81,11 +81,17 @@ export const DigitalMenuBuilder: React.FC<DigitalMenuBuilderProps> = ({
       const bizId = business.id || 'chai-shai-cafe';
       const res = await fetch(`/api/businesses/${bizId}/menu`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-business-key': business.ownerKey || '',
+        },
         body: JSON.stringify(menu),
       });
 
-      if (!res.ok) throw new Error('Failed to save menu changes.');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to save menu changes.');
+      }
       setSaveSuccess('Menu saved and live on customer QR page!');
       setTimeout(() => setSaveSuccess(null), 3000);
     } catch (err: any) {

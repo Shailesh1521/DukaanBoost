@@ -66,7 +66,8 @@ export default function App() {
     visualStyle: 'chai_bites',
     brandColor: '#ea580c',
     googleReviewUrl: 'https://g.page/r/sample-chai-shai-indore/review',
-    staffPin: '1234',
+    ownerKey: 'biz_key_chai_shai_sample_demo_8921',
+    staffPin: '8249',
     createdAt: '2026-10-14T05:00:00.000Z',
   });
 
@@ -128,7 +129,11 @@ export default function App() {
       .catch((err) => console.warn('Using default store settings:', err));
 
     // Fetch initial business
-    fetch('/api/businesses/chai-shai-cafe')
+    fetch('/api/businesses/chai-shai-cafe', {
+      headers: {
+        'x-business-key': 'biz_key_chai_shai_sample_demo_8921',
+      },
+    })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data) setCurrentBusiness(data);
